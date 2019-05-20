@@ -636,15 +636,12 @@ class Proxy(httpserver.SimpleHTTPRequestHandler):
                 for auth in auths:
                     authup = auth.upper()
                     if "NTLM" == authup:
-                        dprint("found NTLM")
                         proxy_type = "NTLM"
                         break
                     if "KERBEROS" == authup:
-                        dprint("found KERBEROS")
                         proxy_type = "KERBEROS"
                         break
                     if "NEGOTIATE" == authup:
-                        dprint("found NEGOTIATE")
                         proxy_type = "NEGOTIATE"
                         break
 
