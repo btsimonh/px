@@ -123,6 +123,11 @@ Configuration:
     remote server is not in noproxy list and proxy is undefined, Px will reject
     the request
 
+  --pac=  proxy:pac=
+  PAC file to use to connect
+    Use in place of server if PAC file should be loaded from a custom URL or
+    file location instead of from Internet Options
+
   --listen=  proxy:listen=
   IP interface to listen on. Valid IP address, default: 127.0.0.1
 
@@ -170,6 +175,13 @@ Configuration:
     Create a generic credential with Px as the network address, this username
     and corresponding password.
 
+  --auth=  proxy:auth=
+  Force instead of discovering upstream proxy type
+    By default, Px will attempt to discover the upstream proxy type and either
+    use pywin32/ntlm-auth for NTLM auth or winkerberos for Kerberos or Negotiate
+    auth. This option will force either NTLM or Kerberos and not query the
+    upstream proxy type. Case sensitive 'NTLM' or 'Kerberos'.
+
   --workers=  settings:workers=
   Number of parallel workers (processes). Valid integer, default: 2
 
@@ -215,6 +227,7 @@ MODE_CONFIG = 1
 MODE_AUTO = 2
 MODE_PAC = 3
 MODE_MANUAL = 4
+MODE_CONFIG_PAC = 5
 
 class State(object):
     allow = netaddr.IPGlob("*.*.*.*")
@@ -233,6 +246,7 @@ class State(object):
     stdout = None
     useragent = ""
     username = ""
+    auth = None
 
     ini = "px.ini"
     max_disconnect = 3
@@ -488,7 +502,10 @@ class Proxy(httpserver.SimpleHTTPRequestHandler):
                 h = "%s: %s\r\n" % (header, self.headers[header])
 
             self.proxy_socket.sendall(h.encode("utf-8"))
-            dprint("Sending %s" % h.strip())
+            if hlower != "authorization":
+                dprint("Sending %s" % h.strip())
+            else:
+                dprint("Sending %s: sanitized len(%d)" % (header, len(self.headers[header])))
 
             if hlower == "content-length":
                 cl = int(self.headers[header])
@@ -561,6 +578,7 @@ class Proxy(httpserver.SimpleHTTPRequestHandler):
             line = self.proxy_fp.readline(State.max_line).decode("utf-8")
             if line == b"":
                 if self.proxy_socket:
+                    self.proxy_socket.shutdown(socket.SHUT_WR)
                     self.proxy_socket.close()
                     self.proxy_socket = None
                 dprint("Proxy closed connection: %s" % resp.code)
@@ -602,7 +620,7 @@ class Proxy(httpserver.SimpleHTTPRequestHandler):
             # Read State.proxy_type only once and use value for function return if it is not None;
             # State.proxy_type should only be read here to avoid getting None after successfully
             # identifying the proxy type if another thread clears it with load_proxy
-            proxy_type = State.proxy_type.get(self.proxy_address)
+            proxy_type = State.proxy_type.get(self.proxy_address, State.auth)
             if proxy_type is None:
                 # New proxy, don't know type yet
                 dprint("Searching proxy type")
@@ -662,6 +680,13 @@ class Proxy(httpserver.SimpleHTTPRequestHandler):
 
                 self.fwd_data(resp, flush=True)
 
+                hconnection = ""
+                for i in ["connection", "Connection"]:
+                    if i in self.headers:
+                        hconnection = self.headers[i]
+                        del self.headers[i]
+                        dprint("Remove header %s: %s" % (i, hconnection))
+
                 # Send auth message
                 resp = self.do_socket({
                     "Proxy-Authorization": "%s %s" % (proxy_type, ntlm_resp)
@@ -684,6 +709,10 @@ class Proxy(httpserver.SimpleHTTPRequestHandler):
                             return Response(503)
 
                         self.fwd_data(resp, flush=True)
+
+                        if hconnection != "":
+                            self.headers["Connection"] = hconnection
+                            dprint("Restore header Connection: " + hconnection)
 
                         # Reply to challenge
                         resp = self.do_socket({
@@ -710,8 +739,10 @@ class Proxy(httpserver.SimpleHTTPRequestHandler):
 
     def do_PAC(self):
         resp = Response(404)
-        if State.proxy_mode == MODE_PAC and "file://" in State.pac:
-            pac = file_url_to_local_path(State.pac)
+        if State.proxy_mode in [MODE_PAC, MODE_CONFIG_PAC]:
+            pac = State.pac
+            if "file://" in State.pac:
+                pac = file_url_to_local_path(State.pac)
             dprint(pac)
             try:
                 resp.code = 200
@@ -738,9 +769,8 @@ class Proxy(httpserver.SimpleHTTPRequestHandler):
 
         if resp.code >= 400:
             dprint("Error %d" % resp.code)
-            self.send_error(resp.code)
-        else:
-            self.fwd_resp(resp)
+
+        self.fwd_resp(resp)
 
         dprint("Done")
 
@@ -775,12 +805,17 @@ class Proxy(httpserver.SimpleHTTPRequestHandler):
     def do_CONNECT(self):
         dprint("Entering")
 
+        for i in ["connection", "Connection"]:
+            if i in self.headers:
+                del self.headers[i]
+                dprint("Remove header " + i)
+
         cl = 0
         cs = 0
         resp = self.do_transaction()
         if resp.code >= 400:
             dprint("Error %d" % resp.code)
-            self.send_error(resp.code)
+            self.fwd_resp(resp)
         else:
             # Proxy connection may be already closed due to header (Proxy-)Connection: close
             # received from proxy -> forward this to the client
@@ -832,7 +867,7 @@ class Proxy(httpserver.SimpleHTTPRequestHandler):
                                 # No data means connection closed by remote host
                                 dprint("Connection closed by %s" % source)
                                 # Because tunnel is closed on one end there is no need to read from both ends
-                                rlist.clear()
+                                del rlist[:]
                                 # Do not write anymore to the closed end
                                 if i in wlist:
                                     wlist.remove(i)
@@ -875,6 +910,7 @@ class Proxy(httpserver.SimpleHTTPRequestHandler):
         # Close both proxy and client connection if still open.
         if self.proxy_socket is not None:
             dprint("Cleanup proxy connection")
+            self.proxy_socket.shutdown(socket.SHUT_WR)
             self.proxy_socket.close()
             self.proxy_socket = None
         self.close_connection = True
@@ -1005,7 +1041,7 @@ class Proxy(httpserver.SimpleHTTPRequestHandler):
         # Get proxy mode and servers straight from load_proxy to avoid
         # threading issues
         (proxy_mode, self.proxy_servers) = load_proxy()
-        if proxy_mode in [MODE_AUTO, MODE_PAC]:
+        if proxy_mode in [MODE_AUTO, MODE_PAC, MODE_CONFIG_PAC]:
             proxy_str = find_proxy_for_url(
                 ("https://" if "://" not in self.path else "") + self.path)
             if proxy_str == "DIRECT":
@@ -1247,7 +1283,7 @@ def file_url_to_local_path(file_url):
 
 def load_proxy(quiet=False):
     # Return if proxies specified in Px config
-    if State.proxy_mode == MODE_CONFIG:
+    if State.proxy_mode in [MODE_CONFIG, MODE_CONFIG_PAC]:
         return (State.proxy_mode, State.proxy_server)
 
     # Do locking to avoid updating globally shared State object by multiple
@@ -1330,9 +1366,9 @@ def find_proxy_for_url(url):
     if State.proxy_mode == MODE_AUTO:
         proxy_str = winhttp_find_proxy_for_url(url, autodetect=True)
 
-    elif State.proxy_mode == MODE_PAC:
+    elif State.proxy_mode in [MODE_PAC, MODE_CONFIG_PAC]:
         pac = State.pac
-        if "file://" in State.pac:
+        if "file://" in State.pac or not State.pac.startswith("http"):
             host = State.config.get("proxy", "listen") or "localhost"
             port = State.config.getint("proxy", "port")
             pac = "http://%s:%d/PxPACFile.pac" % (host, port)
@@ -1343,6 +1379,11 @@ def find_proxy_for_url(url):
     # everything should be direct as the string DIRECT is tested explicitly in
     # get_destination
     if proxy_str.startswith("DIRECT,"):
+        proxy_str = "DIRECT"
+
+    # If the proxy_str it still empty at this point, then there is no proxy
+    # configured. Try to do a direct connection. 
+    if proxy_str == "":
         proxy_str = "DIRECT"
 
     dprint("Proxy found: " + proxy_str)
@@ -1413,6 +1454,33 @@ def set_username(username):
         State.domain = ud[0]
     else:
         State.username = username
+
+def set_pac(pac):
+    if pac == "":
+        return
+
+    pacproxy = False
+    if pac.startswith("http"):
+        pacproxy = True
+
+    elif pac.startswith("file"):
+        pac = file_url_to_local_path(pac)
+
+    if os.path.exists(pac):
+        pacproxy = True
+
+    if pacproxy:
+        State.pac = pac
+    else:
+        pprint("Unsupported PAC location or file not found: %s" % pac)
+        sys.exit()
+
+def set_auth(auth):
+    if auth not in ["NTLM", "Kerberos", ""]:
+        pprint("Bad proxy auth type: %s" % auth)
+        sys.exit()
+    if auth != "":
+      State.auth = auth
 
 def cfg_int_init(section, name, default, override=False):
     val = default
@@ -1496,6 +1564,7 @@ def parse_config():
         State.config.add_section("proxy")
 
     cfg_str_init("proxy", "server", "")
+    cfg_str_init("proxy", "pac", "", set_pac)
     cfg_int_init("proxy", "port", "3128")
     cfg_str_init("proxy", "listen", "127.0.0.1")
     cfg_str_init("proxy", "allow", "*.*.*.*", parse_allow)
@@ -1504,6 +1573,7 @@ def parse_config():
     cfg_str_init("proxy", "noproxy", "", parse_noproxy)
     cfg_str_init("proxy", "useragent", "", set_useragent)
     cfg_str_init("proxy", "username", "", set_username)
+    cfg_str_init("proxy", "auth", "", set_auth)
 
     # [settings] section
     if "settings" not in State.config.sections():
@@ -1526,6 +1596,8 @@ def parse_config():
             val = sys.argv[i].split("=")[1]
             if "--proxy=" in sys.argv[i] or "--server=" in sys.argv[i]:
                 cfg_str_init("proxy", "server", val, None, True)
+            elif "--pac=" in sys.argv[i]:
+                cfg_str_init("proxy", "pac", val, set_pac, True)
             elif "--listen=" in sys.argv[i]:
                 cfg_str_init("proxy", "listen", val, None, True)
             elif "--port=" in sys.argv[i]:
@@ -1538,6 +1610,8 @@ def parse_config():
                 cfg_str_init("proxy", "useragent", val, set_useragent, True)
             elif "--username=" in sys.argv[i]:
                 cfg_str_init("proxy", "username", val, set_username, True)
+            elif "--auth=" in sys.argv[i]:
+                cfg_str_init("proxy", "auth", val, set_auth, True)
             else:
                 for j in ["workers", "threads", "idle", "proxyreload"]:
                     if "--" + j + "=" in sys.argv[i]:
@@ -1591,6 +1665,8 @@ def parse_config():
 
     if State.proxy_server:
         State.proxy_mode = MODE_CONFIG
+    elif State.pac:
+        State.proxy_mode = MODE_CONFIG_PAC
     else:
         load_proxy(quiet=True)
 

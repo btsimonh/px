@@ -151,6 +151,11 @@ Configuration:
     remote server is not in noproxy list and proxy is undefined, Px will reject
     the request
 
+  --pac=  proxy:pac=
+  PAC file to use to connect
+    Use in place of server if PAC file should be loaded from a custom URL or
+    file location instead of from Internet Options
+
   --listen=  proxy:listen=
   IP interface to listen on. Valid IP address, default: 127.0.0.1
 
@@ -197,6 +202,13 @@ Configuration:
     Control Panel > User Accounts > Credential Manager > Windows Credentials.
     Create a generic credential with Px as the network address, this username
     and corresponding password.
+
+  --auth=  proxy:auth=
+  Force instead of discovering upstream proxy type
+    By default, Px will attempt to discover the upstream proxy type and either
+    use pywin32/ntlm-auth for NTLM auth or winkerberos for Kerberos or Negotiate
+    auth. This option will force either NTLM or Kerberos and not query the
+    upstream proxy type. Case sensitive 'NTLM' or 'Kerberos'.
 
   --workers=  settings:workers=
   Number of parallel workers (processes). Valid integer, default: 2
@@ -273,7 +285,7 @@ also be run using a Python distribution with the following additional packages.
 
   `futures` on Python 2.x
 
-Px is tested with the latest releases of Python 2.7, 3.4, 3.5 and 3.6 using the
+Px is tested with the latest releases of Python 2.7, 3.5, 3.6 and 3.7 using the
 Miniconda distribution.
 
 In order to make Px a capable proxy server, it is designed to run in multiple
@@ -282,6 +294,18 @@ this only works on Python 3.3+ since that's when support was added to share
 sockets across processes in Windows. On older versions of Python, Px will run
 multi-threaded but in a single process. The number of threads per process is
 also configurable.
+
+## Building
+
+To build an executable, run built.bat. You will need [PyInstaller](https://www.pyinstaller.org) and the Microsoft VC++ toolset. PyInstaller will prompt you with a link if not present.
+
+  `pip install pyinstaller`
+
+If it complains about missing libraries, then you may modify build.bat to give it the path to the MS dlls:
+
+  `pyinstaller --clean --paths "C:\Program Files (x86)\Windows Kits\10\Redist\ucrt\DLLs\x64" --noupx -w -F -i px.ico px.py --hidden-import win32timezone --exclude-module win32ctypes`
+
+Substitute the correct path for your system.
 
 ## Feedback
 
