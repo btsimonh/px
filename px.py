@@ -630,13 +630,23 @@ class Proxy(httpserver.SimpleHTTPRequestHandler):
                 for header in resp.headers:
                     if header[0] == "Proxy-Authenticate":
                         proxy_auth += header[1] + " "
-
-                    if "NTLM" in proxy_auth.upper():
+                        
+                # use order of auth schemes in headers as priority order
+                auths = proxy_auth.split();
+                for auth in auths:
+                    authup = auth.upper()
+                    if "NTLM" == authup:
+                        dprint("found NTLM")
                         proxy_type = "NTLM"
-                    elif "KERBEROS" in proxy_auth.upper():
+                        break
+                    if "KERBEROS" == authup:
+                        dprint("found KERBEROS")
                         proxy_type = "KERBEROS"
-                    elif "NEGOTIATE" in proxy_auth.upper():
+                        break
+                    if "NEGOTIATE" == authup:
+                        dprint("found NEGOTIATE")
                         proxy_type = "NEGOTIATE"
+                        break
 
                 if proxy_type is not None:
                     # Writing State.proxy_type only once but use local variable as return value to avoid
